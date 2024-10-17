@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+#shellcheck disable=SC2016,SC2086
+#SC2016: expressions don't expand in single quotes -> purposely in sed
+#SC2086: double quote to prevent word splitting -> exactly what we need w/ set
 
 SCRIPTSTARTTIME=$(date +%s)
 
 # get keys for ssh and signing
-eval $(env SHELL=/bin/bash keychain -q --noask --eval)
+eval "$(env SHELL=/bin/bash keychain -q --noask --eval)"
 
 BASE_PATH="$(readlink -f "${BASH_SOURCE[0]%/*}")"
 
@@ -17,10 +20,9 @@ RSYNCDIR="${BASE_PATH}/master-rsync-tree"
 #### ---- Portage setup (use local modified copy) ---- ####
 
 PORTAGE_BASE_PATH="${BASE_PATH}/prefix/usr/lib/portage/"
-PYTHONPATH="${PORTAGE_BASE_PATH}/pym"
+PYTHONPATH="${PORTAGE_BASE_PATH}/lib"
 PORTAGE_CONFIGROOT="${BASE_PATH}/misc/config_root"
 PORTAGE_DEPCACHEDIR="${BASE_PATH}/depcache"
-MANIFEST_CACHE="${BASE_PATH}/manifests"
 
 # for .cvsps and gnupg cache mainly
 HOME="${BASE_PATH}/misc"
@@ -34,7 +36,12 @@ echo "(init) PATH=$PATH"
 
 #### ---- egencache settings ---- ####
 
-EGENCACHE_OPTS="--jobs=$(nproc) --load-average=$(nproc) --tolerant --update-use-local-desc"
+EGENCACHE_OPTS=(
+	"--jobs=$(nproc)"
+	"--load-average=$(nproc)"
+	"--tolerant"
+	"--update-use-local-desc"
+)
 
 export PYTHONPATH PORTDIR PORTAGE_BASE_PATH PORTAGE_CONFIGROOT  \
 	ROOT PORTAGE_TMPFS FEATURES HOME
@@ -66,8 +73,8 @@ apply_git_mtimes() {
 		git log --pretty=%ct --name-status --reverse "${from}..${to}"
 		echo 999  # end marker to trigger the last block to be done
 	} | \
-	while read line ; do
-		case ${line} in
+	while read -r line ; do
+		case "${line}" in
 			[0-9][0-9][0-9]*)
 				if [[ ${ts} -gt 0 ]] ; then
 					[[ ${#files[@]} == 0 ]] || \
@@ -78,11 +85,11 @@ apply_git_mtimes() {
 				;;
 			[ACMT]*)
 				set -- ${line}
-				files+=( $2 )
+				files+=( "$2" )
 				;;
 			[R]*)
 				set -- ${line}
-				files+=( $3 )
+				files+=( "$3" )
 				;;
 			[D]*)
 				set -- ${line}
@@ -95,8 +102,8 @@ apply_git_mtimes() {
 					# if the entire package was removed, touch the
 					# category level metadata
 					[[ -f ${f%/*}/metadata.xml ]] \
-						&& files+=( ${f%/*}/metadata.xml ) \
-						|| files+=( ${f%/*/*}/metadata.xml )
+						&& files+=( "${f%/*}"/metadata.xml ) \
+						|| files+=( "${f%/*/*}"/metadata.xml )
 				fi
 				;;
 		esac
@@ -201,8 +208,8 @@ echo "($(date +"%F %R")) git image updated"
 echo "($(date +"%F %R")) rsync Prefix tree to rsync-master"
 for entry in scripts *-*/* ; do
 	# copy it over
-	[[ -e ${RSYNCDIR}/${entry} ]] || mkdir -p "${RSYNCDIR}"/${entry}
-	rsync -v --delete -aC "${PREFIXTREEDIR}"/${entry}/ "${RSYNCDIR}"/${entry}/
+	[[ -e ${RSYNCDIR}/${entry} ]] || mkdir -p "${RSYNCDIR}/${entry}"
+	rsync -v --delete -aC "${PREFIXTREEDIR}/${entry}"/ "${RSYNCDIR}/${entry}"/
 done
 
 # we excluded the eclasses above, because we "overlay" them from gx86
@@ -230,7 +237,7 @@ START=$(date +%s)
 # generate the metadata
 echo "($(date +"%F %R")) generating metadata"
 dolog() {
-	echo $*
+	echo "$*"
 	"$@"
 }
 dolog "${PORTAGE_BASE_PATH}/bin/egencache" --update --rsync \
@@ -247,7 +254,7 @@ sync-type = rsync
 sync-uri = rsync://dont-sync
 auto-sync = no
 ' \
-	${EGENCACHE_OPTS} \
+	"${EGENCACHE_OPTS[@]}" \
 	|| exit 5
 
 STOP=$(date +%s)
@@ -281,8 +288,8 @@ sed -e '/^thin-manifests/s/true/false/' \
 # Signing is done with our snapshot signing key, and only on the top
 # level Manifest, for it covers indirectly the entire tree
 # remember, HOME is set to misc/ so .gnupg keychain lives there
-cat "${BASE_PATH}"/autosigner.pwd | \
-	qmanifest -g -p -s "0xC6317B3C" "${RSYNCDIR}" || \
+qmanifest -g -p -s "0xC6317B3C" "${RSYNCDIR}" \
+	< "${BASE_PATH}"/autosigner.pwd || \
 	echo "Manifest generation and/or signing failed!" >> /dev/stderr
 
 echo "($(date +"%F %R")) Manifest signed"

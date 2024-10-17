@@ -1,66 +1,65 @@
-# Copyright 1999-2022 Gentoo Authors
+# Copyright 1999-2024 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
 EAPI=8
 
 TOOLCHAIN_PATCH_DEV="sam"
-PATCH_GCC_VER="13.2.0"
-PATCH_VER="7"
-MUSL_VER="2"
-MUSL_GCC_VER="13.2.0"
+TOOLCHAIN_HAS_TESTS=1
+PATCH_GCC_VER="14.1.0"
+PATCH_VER="4"
+MUSL_VER="1"
+MUSL_GCC_VER="14.1.0"
+PYTHON_COMPAT=( python3_{10..12} )
+
+if [[ -n ${TOOLCHAIN_GCC_RC} ]] ; then
+	# Cheesy hack for RCs
+	MY_PV=$(ver_cut 1).$((($(ver_cut 2) + 1))).$((($(ver_cut 3) - 1)))-RC-$(ver_cut 5)
+	MY_P=${PN}-${MY_PV}
+	GCC_TARBALL_SRC_URI="mirror://gcc/snapshots/${MY_PV}/${MY_P}.tar.xz"
+	TOOLCHAIN_SET_S=no
+	S="${WORKDIR}"/${MY_P}
+fi
 
 inherit toolchain
 
-# Don't keyword live ebuilds
-if ! tc_is_live && [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
+if tc_is_live ; then
+	# Needs to be after inherit (for now?), bug #830908
+	EGIT_BRANCH=releases/gcc-$(ver_cut 1)
+elif [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
+	# Don't keyword live ebuilds
 	KEYWORDS="~amd64-linux ~x86-linux ~arm64-macos ~ppc-macos ~x64-macos ~x64-solaris"
 fi
 
 # use alternate source for Apple M1 (also works for x86_64)
-IANSGCCVER="gcc-13.2-darwin-r0"
-SRC_URI+=" elibc_Darwin? (
-https://github.com/iains/gcc-13-branch/archive/refs/tags/${IANSGCCVER}.tar.gz )"
+SRC_URI+=" elibc_Darwin? ( https://raw.githubusercontent.com/Homebrew/formula-patches/d5dcb918a951b2dcf2d7702db75eb29ef144f614/gcc/gcc-14.2.0.diff -> gcc-14.2.0-arm64-darwin.patch )"
+IUSE+=" system-bootstrap"
 
-IUSE+="bootstrap"
-
-# Technically only if USE=hardened *too* right now, but no point in complicating it further.
-# If GCC is enabling CET by default, we need glibc to be built with support for it.
-# bug #830454
-RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
-DEPEND="${RDEPEND}"
-BDEPEND="
-	kernel_linux? ( >=${CATEGORY}/binutils-2.30[cet(-)?] )
-	kernel_Darwin? (
-		|| ( ${CATEGORY}/binutils-apple ${CATEGORY}/native-cctools )
-	)"
-
-src_unpack() {
-	if use elibc_Darwin ; then
-		# just use Ian's source, not the main one
-		S="${WORKDIR}/gcc-13-branch-${IANSGCCVER}"
-	fi
-	default
-}
+if [[ ${CATEGORY} != cross-* ]] ; then
+	# Technically only if USE=hardened *too* right now, but no point in complicating it further.
+	# If GCC is enabling CET by default, we need glibc to be built with support for it.
+	# bug #830454
+	RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
+	DEPEND="${RDEPEND}"
+fi
 
 src_prepare() {
+	# apply big arm64-darwin patch first thing
+	use elibc_Darwin && eapply "${DISTDIR}"/${P}-arm64-darwin.patch
+
+	# run as with - on pipe (for Clang 16)
+	eapply "${FILESDIR}"/${PN}-14.2.0-darwin-as-dash-pipe.patch
+
 	# make sure 64-bits native targets don't screw up the linker paths
 	eapply "${FILESDIR}"/gcc-12-no-libs-for-startfile.patch
 
-	if [[ ${CHOST} == *-darwin* ]] ; then
-		# https://bugs.gentoo.org/898610#c17
-		# kill no_pie patch, it breaks things here
-		rm "${WORKDIR}"/patch/09_all_nopie-all-flags.patch || die
-		# fails on Darwin's sources
-		rm "${WORKDIR}"/patch/81_all_match.p*.patch
-	fi
-	# doesn't apply on official and Darwin sources
-	rm "${WORKDIR}"/patch/31_all_gm2_make_P_var.patch
+	local p upstreamed_patches=(
+		# add them here
+	)
+	for p in "${upstreamed_patches[@]}"; do
+		rm -v "${WORKDIR}/patch/${p}" || die
+	done
 
 	toolchain_src_prepare
-
-	eapply_user
-
-	eapply "${FILESDIR}"/${PN}-13-fix-cross-fixincludes.patch
 
 	# make it have correct install_names on Darwin
 	eapply -p1 "${FILESDIR}"/4.3.3/darwin-libgcc_s-installname.patch
@@ -78,11 +77,12 @@ src_prepare() {
 	fi
 
 	if [[ ${CHOST} == *-darwin* ]] ; then
-		use bootstrap && eapply "${FILESDIR}"/${PN}-13-darwin14-bootstrap.patch
+		use system-bootstrap && eapply "${FILESDIR}"/${PN}-13-darwin14-bootstrap.patch
 
 		# our ld64 is a slight bit different, so tweak expression to not
 		# get confused and break the build
-		sed -i -e 's/grep ld64/grep :ld64/' gcc/configure || die
+		sed -i -e "s/EGREP 'ld64|dyld'/& | head -n1/" \
+			gcc/configure{.ac,} || die
 
 		# rip out specific macos version min
 		sed -i -e 's/-mmacosx-version-min=11.0//' \
@@ -90,6 +90,9 @@ src_prepare() {
 			libgcc/config/aarch64/t-heap-trampoline \
 			|| die
 	fi
+
+	eapply "${FILESDIR}"/${PN}-13-fix-cross-fixincludes.patch
+	eapply_user
 }
 
 src_configure() {
@@ -117,11 +120,6 @@ src_configure() {
 		*-solaris*)
 			# todo: some magic for native vs. GNU linking?
 			myconf+=( --with-gnu-ld --with-gnu-as --enable-largefile )
-			# Solaris 11 defines this in its headers, but that causes a
-			# mismatch whilst compiling, bug #657514
-			#export ac_cv_func_aligned_alloc=no
-			#export ac_cv_func_memalign=no
-			#export ac_cv_func_posix_memalign=no
 		;;
 		i[34567]86-*-linux*:*" prefix "*)
 			# to allow the linux-x86-on-amd64.patch become useful, we need
@@ -135,17 +133,6 @@ src_configure() {
 			fi
 		;;
 	esac
-
-	if [[ ${CHOST} == *-darwin ]] ; then
-		# GCC' Darwin fork enables support for "-stdlib=libc++"
-		# unconditionally, and its default include path is invalid,
-		# causing package build failures due to missing header.
-		# But more importantly, it breaks the assumption of many build
-		# scripts and changes their CFLAGS and linking behaviors. The
-		# situation is tricky and needs careful considerations.
-		# For now, just disable support for "-stdlib=libc++".
-		myconf+=( --with-gxx-libcxx-include-dir=no )
-	fi
 
 	# Since GCC 4.1.2 some non-posix (?) /bin/sh compatible code is used, at
 	# least on Solaris, and AIX /bin/sh is way too slow,

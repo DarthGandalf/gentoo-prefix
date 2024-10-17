@@ -1,69 +1,64 @@
-# Copyright 1999-2022 Gentoo Authors
+# Copyright 1999-2024 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
 EAPI=8
 
 TOOLCHAIN_PATCH_DEV="sam"
-PATCH_VER="7"
-PATCH_GCC_VER="12.1.0"
-MUSL_VER="4"
-MUSL_GCC_VER="12.1.0"
+PATCH_GCC_VER="14.1.0"
+PATCH_VER="3"
+MUSL_VER="1"
+MUSL_GCC_VER="14.1.0"
+PYTHON_COMPAT=( python3_{10..12} )
+
+if [[ -n ${TOOLCHAIN_GCC_RC} ]] ; then
+	# Cheesy hack for RCs
+	MY_PV=$(ver_cut 1).$((($(ver_cut 2) + 1))).$((($(ver_cut 3) - 1)))-RC-$(ver_cut 5)
+	MY_P=${PN}-${MY_PV}
+	GCC_TARBALL_SRC_URI="mirror://gcc/snapshots/${MY_PV}/${MY_P}.tar.xz"
+	TOOLCHAIN_SET_S=no
+	S="${WORKDIR}"/${MY_P}
+fi
 
 inherit toolchain
 
-# Don't keyword live ebuilds
-if ! tc_is_live && [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
+if tc_is_live ; then
+	# Needs to be after inherit (for now?), bug #830908
+	EGIT_BRANCH=releases/gcc-$(ver_cut 1)
+elif [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
+	# Don't keyword live ebuilds
 	KEYWORDS="~amd64-linux ~x86-linux ~arm64-macos ~ppc-macos ~x64-macos ~x64-solaris"
 fi
 
 # use alternate source for Apple M1 (also works for x86_64)
-IANSGCCVER="gcc-12.1-darwin-r0"
-SRC_URI+=" elibc_Darwin? (
-https://github.com/iains/gcc-12-branch/archive/refs/tags/${IANSGCCVER}.tar.gz )"
+SRC_URI+=" elibc_Darwin? ( https://raw.githubusercontent.com/Homebrew/formula-patches/82b5c1cd38826ab67ac7fc498a8fe74376a40f4a/gcc/gcc-14.1.0.diff -> gcc-14.1.0-arm64-darwin.patch https://github.com/iains/gcc-14-branch/commit/75ff8c390327ac693f6a1c40510bc0d35d7a1e22.patch?full_index=1 -> gcc-14.1.0-macos-SDK-availability.patch )"
+IUSE+=" system-bootstrap"
 
-# Technically only if USE=hardened *too* right now, but no point in complicating it further.
-# If GCC is enabling CET by default, we need glibc to be built with support for it.
-# bug #830454
-RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
-DEPEND="${RDEPEND}"
-BDEPEND="
-	kernel_linux? ( >=${CATEGORY}/binutils-2.30[cet(-)?] )
-	kernel_Darwin? (
-		|| ( ${CATEGORY}/binutils-apple ${CATEGORY}/native-cctools )
-	)"
-
-src_unpack() {
-	if use elibc_Darwin ; then
-		# just use Ian's source, not the main one
-		S="${WORKDIR}/gcc-12-branch-${IANSGCCVER}"
-	fi
-	default
-}
+if [[ ${CATEGORY} != cross-* ]] ; then
+	# Technically only if USE=hardened *too* right now, but no point in complicating it further.
+	# If GCC is enabling CET by default, we need glibc to be built with support for it.
+	# bug #830454
+	RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
+	DEPEND="${RDEPEND}"
+fi
 
 src_prepare() {
-	if [[ ${CHOST} == *-darwin* ]] ; then
-		# https://bugs.gentoo.org/898610#c17
-		# kill no_pie patch, it breaks things here
-		rm "${WORKDIR}"/patch/09_all_nopie-all-flags.patch || die
-	fi
-
-	toolchain_src_prepare
-
-	eapply_user
-
-	# fix build for macOS 13 Ventura
-	eapply "${FILESDIR}"/gcc-12.1.0-recognize-mmacosx-version-min-13.0-and-newer.patch
-	eapply "${FILESDIR}"/gcc-12.1.0-avoid-null-terminated-name-collision-with-macos-13-sdk.patch
+	# apply big arm64-darwin patch first thing
+	use elibc_Darwin && eapply \
+		"${DISTDIR}"/gcc-14.1.0-arm64-darwin.patch \
+		"${DISTDIR}"/gcc-14.1.0-macos-SDK-availability.patch
 
 	# make sure 64-bits native targets don't screw up the linker paths
 	eapply "${FILESDIR}"/gcc-12-no-libs-for-startfile.patch
-	if use prefix; then
-		eapply "${FILESDIR}"/gcc-12-prefix-search-dirs.patch
-		# try /usr/lib32 in 32bit profile on x86_64-linux (needs
-		# --enable-multilib), but this does make sense in prefix only
-		eapply -p0 "${FILESDIR}"/${PN}-4.8.3-linux-x86-on-amd64.patch
-	fi
 
+	local p upstreamed_patches=(
+		# add them here
+	)
+	for p in "${upstreamed_patches[@]}"; do
+		rm -v "${WORKDIR}/patch/${p}" || die
+	done
+
+	toolchain_src_prepare
+	#
 	# make it have correct install_names on Darwin
 	eapply -p1 "${FILESDIR}"/4.3.3/darwin-libgcc_s-installname.patch
 
@@ -78,6 +73,24 @@ src_prepare() {
 		# posix_madvise however, is
 		sed -i -e 's/madvise/posix_madvise/' gcc/cp/module.cc || die
 	fi
+
+	if [[ ${CHOST} == *-darwin* ]] ; then
+		use system-bootstrap && eapply "${FILESDIR}"/${PN}-13-darwin14-bootstrap.patch
+
+		# our ld64 is a slight bit different, so tweak expression to not
+		# get confused and break the build
+		sed -i -e "s/EGREP 'ld64|dyld'/& | head -n1/" \
+			gcc/configure{.ac,} || die
+
+		# rip out specific macos version min
+		sed -i -e 's/-mmacosx-version-min=11.0//' \
+			libgcc/config/aarch64/t-darwin \
+			libgcc/config/aarch64/t-heap-trampoline \
+			|| die
+	fi
+
+	eapply "${FILESDIR}"/${PN}-13-fix-cross-fixincludes.patch
+	eapply_user
 }
 
 src_configure() {
@@ -102,21 +115,9 @@ src_configure() {
 			# use sysroot with the linker, #756160
 			export gcc_cv_ld_sysroot=yes
 			;;
-		arm64-*-darwin*)
-			# only supported from darwin21, so no conflict with above
-			# case switch
-			# for the time being use system flex, for our doesn't work
-			# here (while it does fine elsewhere), #778014
-			export ac_cv_prog_FLEX=/usr/bin/flex
-			;;
 		*-solaris*)
 			# todo: some magic for native vs. GNU linking?
 			myconf+=( --with-gnu-ld --with-gnu-as --enable-largefile )
-			# Solaris 11 defines this in its headers, but that causes a
-			# mismatch whilst compiling, bug #657514
-			export ac_cv_func_aligned_alloc=no
-			export ac_cv_func_memalign=no
-			export ac_cv_func_posix_memalign=no
 		;;
 		i[34567]86-*-linux*:*" prefix "*)
 			# to allow the linux-x86-on-amd64.patch become useful, we need

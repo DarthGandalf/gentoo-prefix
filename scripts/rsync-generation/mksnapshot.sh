@@ -14,7 +14,7 @@ SNAME=${PWD}/portage-$(date +%Y%m%d -d @${YESTERDAY}).tar
 TMPDIR=${PWD}/tmp-prefix-snapshot
 
 # clean up
-find . -maxdepth 2 -daystart -ctime +4 -type f | xargs --no-run-if-empty rm
+find . -maxdepth 2 -daystart -ctime +4 -type f -exec rm '{}' +
 
 # pull in active snapshot
 BOOTSTRAP_SNAPSHOT=$( \
@@ -22,74 +22,80 @@ BOOTSTRAP_SNAPSHOT=$( \
 	sed -n 's/^.*PV="\([0-9]\+\)"\s*$/portage-\1.tar.bz2/p' \
 )
 if [[ ! -s "${BOOTSTRAP_SNAPSHOT}" ]] ; then
-	curl -s -L "https://distfiles.prefix.bitzolder.nl/prefix/distfiles/${BOOTSTRAP_SNAPSHOT}" > "${BOOTSTRAP_SNAPSHOT}"
+	curl -f -s -L "https://distfiles.prefix.bitzolder.nl/prefix/distfiles/${BOOTSTRAP_SNAPSHOT}" > "${BOOTSTRAP_SNAPSHOT}"
 fi
 
-rm -Rf ${TMPDIR}
-mkdir -p ${TMPDIR}
+rm -Rf "${TMPDIR}"
+mkdir -p "${TMPDIR}"
 
 # quickly take a snapshot, such that we get a consistent image
-pushd ${RSYNCTREE} > /dev/null
-tar -cf ${SNAME} --exclude=snapshots * || exit 1
-popd > /dev/null
+pushd "${RSYNCTREE}" > /dev/null || exit 1
+tar -cf "${SNAME}" --exclude=snapshots -- * || exit 1
+popd > /dev/null || exit 1
 
 # now revamp it such that it's in a directory "portage"
-rm -Rf ${TMPDIR}
-mkdir -p ${TMPDIR}
-pushd ${TMPDIR} > /dev/null
+rm -Rf "${TMPDIR}"
+mkdir -p "${TMPDIR}"
+pushd "${TMPDIR}" > /dev/null || exit 1
 mkdir portage
-tar -xf ${SNAME} -C portage/
-tar --numeric-owner --format=posix --hard-dereference -cf ${SNAME} portage/
-popd > /dev/null
+tar -xf "${SNAME}" -C portage/
+tar --numeric-owner --format=posix --hard-dereference -cf "${SNAME}" portage/
+popd > /dev/null || exit 1
 
-rm -Rf ${TMPDIR}
+rm -Rf "${TMPDIR}"
 
-# be nice
-nice -n19 bzip2 -c -9 ${SNAME} > ${SNAME}.bz2 &
-nice -n19 xz -c -9 ${SNAME} > ${SNAME}.xz &
-nice -n19 gzip -c -9 ${SNAME} > ${SNAME}.gz &
+# The differences in size (57/52/47MB) for bz2,zstd,lz are not really that
+# big considering gzip's size (75MB) but the bootstrap-prefix script and
+# the logic above rely on .bz2 snapshot, so in reality no other format
+# than bzip2-compressed is necessary.  Since bzip2 is available
+# everywhere, or bootstrapped just fine for a long long time, stick with
+# it, for it is good enough for its purpose here
+COMPRS=(
+	"bz2:bzip2 -c -9"
+#	"lz:lzip -c -9"
+#	"zst:zstd -c -19"
+)
+
+# produce compressed variants, use as much cpu as left on the system, do
+# all in parallel
+for compr in "${COMPRS[@]}" ; do
+	read -r -a args <<< "${compr#*:}"
+	nice -n19 "${args[@]}" "${SNAME}" > "${SNAME}.${compr%%:*}" &
+done
 wait
 
 # generate accompanying meta files
-md5sum ${SNAME##*/}      > ${SNAME}.xz.umd5sum
-md5sum ${SNAME##*/}.xz   > ${SNAME}.xz.md5sum
-md5sum ${SNAME##*/}      > ${SNAME}.bz2.umd5sum
-md5sum ${SNAME##*/}.bz2  > ${SNAME}.bz2.md5sum
-md5sum ${SNAME##*/}      > ${SNAME}.gz.umd5sum
-md5sum ${SNAME##*/}.bz2  > ${SNAME}.gz.md5sum
-# gpg is really stupid, or I am too stupid to find the right option
-gpgopts="--quiet --batch --no-tty --passphrase-fd 0 --pinentry-mode loopback"
-gpgopts+=" --default-key C6317B3C --detach-sign --armor"
-gpg ${gpgopts} -o ${SNAME}.xz.gpgsig ${SNAME}.xz < ${SCRIPTLOC}/autosigner.pwd
-gpg ${gpgopts} -o ${SNAME}.bz2.gpgsig ${SNAME}.bz2 < ${SCRIPTLOC}/autosigner.pwd
-gpg ${gpgopts} -o ${SNAME}.gz.gpgsig ${SNAME}.gz < ${SCRIPTLOC}/autosigner.pwd
-
-# we no longer need the tar
-rm ${SNAME}
-
-# make convenience symlinks
-for f in {xz,bz2,gz}{,.gpgsig,.md5sum,.umd5sum} ; do
-	rm portage-latest.tar.$f
-	ln -s ${SNAME##*/}.$f portage-latest.tar.$f
+for compr in "${COMPRS[@]}" ; do
+	compr=${compr%%:*}
+	md5sum "${SNAME##*/}"          > "${SNAME}.${compr}.umd5sum"
+	md5sum "${SNAME##*/}.${compr}" > "${SNAME}.${compr}.md5sum"
 done
 
-# darkside's delta code
+# create GPG detached signature, use passphrase-fd to pass password
+gpgopts=(
+	"--quiet"
+	"--batch"
+	"--no-tty"
+	"--passphrase-fd" 0
+	"--pinentry-mode" "loopback"
+	"--default-key" "C6317B3C"
+	"--detach-sign"
+	"--armor"
+)
+for compr in "${COMPRS[@]}" ; do
+	compr=${compr%%:*}
+	gpg "${gpgopts[@]}" -o "${SNAME}.${compr}.gpgsig" "${SNAME}.${compr}" \
+		< "${SCRIPTLOC}"/autosigner.pwd
+done
 
-# FAILS and nobody cares!
+# we no longer need the (original/uncompressed) tar
+rm "${SNAME}"
 
-#YESTERDAY=$(date +%Y%m%d -d @${YESTERDAY})
-#TODAY=$(date +%Y%m%d -d @${TODAY})
-#cp portage-{${YESTERDAY},${TODAY}}.tar.bz2 /dev/shm/
-#SNAP_DIR=${PWD}
-#
-#cd /dev/shm
-#bunzip2 portage*
-#
-#differ -f bdelta portage-{${YESTERDAY},${TODAY}}.tar \
-#    ${SNAP_DIR}/deltas/snapshot-${YESTERDAY}-${TODAY}.patch
-#
-#bzip2 "${SNAP_DIR}/deltas/snapshot-${YESTERDAY}-${TODAY}.patch"
-#
-#rm -f portage* snapshot*
-
-# FAILS and nobody cares
+# make convenience symlinks
+for compr in "${COMPRS[@]}" ; do
+	compr=${compr%%:*}
+	for f in "${compr}"{,.gpgsig,.md5sum,.umd5sum} ; do
+		rm "portage-latest.tar.${f}"
+		ln -s "${SNAME##*/}.${f}" "portage-latest.tar.${f}"
+	done
+done

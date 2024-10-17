@@ -1,58 +1,81 @@
-# Copyright 1999-2022 Gentoo Authors
+# Copyright 1999-2024 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
 EAPI=8
 
 TOOLCHAIN_PATCH_DEV="sam"
-PATCH_GCC_VER="14.0.0"
-PATCH_VER="24"
-MUSL_VER="1"
-MUSL_GCC_VER="14.0.0"
+PATCH_GCC_VER="13.2.0"
+MUSL_GCC_VER="13.2.0"
+PATCH_VER="16"
+MUSL_VER="2"
+PYTHON_COMPAT=( python3_{10..12} )
+
+if [[ ${PV} == *.9999 ]] ; then
+	MY_PV_2=$(ver_cut 2)
+	MY_PV_3=1
+	if [[ ${MY_PV_2} == 0 ]] ; then
+		MY_PV_2=0
+		MY_PV_3=0
+	else
+		MY_PV_2=$((${MY_PV_2} - 1))
+	fi
+
+	# e.g. 12.2.9999 -> 12.1.1
+	TOOLCHAIN_GCC_PV=$(ver_cut 1).${MY_PV_2}.${MY_PV_3}
+elif [[ -n ${TOOLCHAIN_GCC_RC} ]] ; then
+	# Cheesy hack for RCs
+	MY_PV=$(ver_cut 1).$((($(ver_cut 2) + 1))).$((($(ver_cut 3) - 1)))-RC-$(ver_cut 5)
+	MY_P=${PN}-${MY_PV}
+	GCC_TARBALL_SRC_URI="mirror://gcc/snapshots/${MY_PV}/${MY_P}.tar.xz"
+	TOOLCHAIN_SET_S=no
+	S="${WORKDIR}"/${MY_P}
+fi
 
 inherit toolchain
 
-# Don't keyword live ebuilds
-if ! tc_is_live && [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
-	#KEYWORDS="~amd64-linux ~x86-linux ~arm64-macos ~ppc-macos ~x64-macos ~x64-solaris"
-	# can't bootstrap from this using clang's libc++, better not use it
-	KEYWORDS=""
+if tc_is_live ; then
+	# Needs to be after inherit (for now?), bug #830908
+	EGIT_BRANCH=releases/gcc-$(ver_cut 1)
+elif [[ -z ${TOOLCHAIN_USE_GIT_PATCHES} ]] ; then
+	# Don't keyword live ebuilds
+	KEYWORDS="~amd64-linux ~x86-linux ~arm64-macos ~ppc-macos ~x64-macos ~x64-solaris"
 fi
 
 # use alternate source for Apple M1 (also works for x86_64)
-IANSGCCVER="9bc66f9b11baf1c291b2afac429cb12bf8461f91"
-SRC_URI+=" elibc_Darwin? ( https://github.com/iains/gcc-darwin-arm64/archive/${IANSGCCVER}.tar.gz -> gcc-darwin-arm64-${PV}.tar.gz )"
+SRC_URI+=" elibc_Darwin? ( https://raw.githubusercontent.com/Homebrew/formula-patches/bda0faddfbfb392e7b9c9101056b2c5ab2500508/gcc/gcc-${PV}.diff -> gcc-${PV}-arm64-darwin.patch )"
+IUSE+=" system-bootstrap"
 
-# Technically only if USE=hardened *too* right now, but no point in complicating it further.
-# If GCC is enabling CET by default, we need glibc to be built with support for it.
-# bug #830454
-RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
-DEPEND="${RDEPEND}"
-BDEPEND="
-	kernel_linux? ( >=${CATEGORY}/binutils-2.30[cet(-)?] )
-	kernel_Darwin? (
-		|| ( ${CATEGORY}/binutils-apple ${CATEGORY}/native-cctools )
-	)"
-
-src_unpack() {
-	if use elibc_Darwin ; then
-		# just use Ian's source, not the main one
-		S="${WORKDIR}/gcc-darwin-arm64-${IANSGCCVER}"
-	fi
-	default
-}
+if [[ ${CATEGORY} != cross-* ]] ; then
+	# Technically only if USE=hardened *too* right now, but no point in complicating it further.
+	# If GCC is enabling CET by default, we need glibc to be built with support for it.
+	# bug #830454
+	RDEPEND="!prefix-guest? ( elibc_glibc? ( sys-libs/glibc[cet(-)?] ) )"
+	DEPEND="${RDEPEND}"
+	BDEPEND="amd64? ( >=${CATEGORY}/binutils-2.30[cet(-)?] )
+		kernel_Darwin? (
+			|| ( ${CATEGORY}/binutils-apple ${CATEGORY}/native-cctools )
+		)"
+fi
 
 src_prepare() {
+	# apply big arm64-darwin patch first thing
+	use elibc_Darwin && eapply "${DISTDIR}"/gcc-${PV}-arm64-darwin.patch
+
 	# make sure 64-bits native targets don't screw up the linker paths
 	eapply "${FILESDIR}"/gcc-12-no-libs-for-startfile.patch
 
-	# doesn't apply on official and Darwin sources
-	rm "${WORKDIR}"/patch/31_all_gm2_make_P_var.patch
+	if [[ ${CHOST} == *-darwin* ]] ; then
+		# https://bugs.gentoo.org/898610#c17
+		# kill no_pie patch, it breaks things here
+		rm "${WORKDIR}"/patch/09_all_nopie-all-flags.patch || die
+		# fails on Darwin's sources
+		rm "${WORKDIR}"/patch/8[12]_all_*match.pd*.patch || die
+		rm "${WORKDIR}"/patch/86_all_*seq*.patch || die
+		rm "${WORKDIR}"/patch/87_all_*MATCHPD*.patch || die
+		rm "${WORKDIR}"/patch/90_all_*genemit*.patch || die
+	fi
 
 	toolchain_src_prepare
-
-	eapply_user
-
-	eapply "${FILESDIR}"/${PN}-13-fix-cross-fixincludes.patch
 
 	# make it have correct install_names on Darwin
 	eapply -p1 "${FILESDIR}"/4.3.3/darwin-libgcc_s-installname.patch
@@ -70,20 +93,22 @@ src_prepare() {
 	fi
 
 	if [[ ${CHOST} == *-darwin* ]] ; then
+		use system-bootstrap && eapply "${FILESDIR}"/${PN}-13-darwin14-bootstrap.patch
+
 		# our ld64 is a slight bit different, so tweak expression to not
 		# get confused and break the build
-		sed -i -e 's/grep ld64/grep :ld64/' gcc/configure || die
+		sed -i -e "s/EGREP 'ld64|dyld'/& | head -n1/" \
+			gcc/configure{.ac,} || die
 
 		# rip out specific macos version min
 		sed -i -e 's/-mmacosx-version-min=11.0//' \
 			libgcc/config/aarch64/t-darwin \
 			libgcc/config/aarch64/t-heap-trampoline \
 			|| die
-
-		# weird, because we call --disable-host-bind-now but the check
-		# interprets that as as using -Wl,-z,now
-		sed -i -e 's/-Wl,-z,now//' c++tools/configure{.ac,} || die
 	fi
+
+	eapply "${FILESDIR}"/${PN}-13-fix-cross-fixincludes.patch
+	eapply_user
 }
 
 src_configure() {

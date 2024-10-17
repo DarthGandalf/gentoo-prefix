@@ -1,9 +1,9 @@
 # Copyright 1999-2024 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
-EAPI=6
+EAPI=7
 
-inherit eutils prefix
+inherit toolchain-funcs prefix
 
 DESCRIPTION="Utility to change the binutils version being used"
 HOMEPAGE="https://www.gentoo.org/"
@@ -26,7 +26,7 @@ src_prepare() {
 	cp "${FILESDIR}"/${PN}-${PV} ./${PN} || die
 	cp "${FILESDIR}"/ldwrapper.c ./${PN}-ldwrapper-${WRAPPER_REV}.c || die
 	if use prefix-guest; then
-		epatch "${FILESDIR}/${PN}-5-ldwrapper.patch"
+		eapply "${FILESDIR}/${PN}-5-ldwrapper.patch" || die
 	fi
 	eprefixify ${PN}
 	eapply_user
