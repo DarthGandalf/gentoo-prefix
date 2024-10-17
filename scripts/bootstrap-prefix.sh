@@ -2473,7 +2473,7 @@ bootstrap_stage3() {
 
 	# Start using apps from new target
 	cat > "${ROOT}"/tmp/etc/env.d/10stage3 <<-EOF
-		PATH="${ROOT}/usr/bin:${ROOT}/bin:${ROOT}"
+		PATH="${ROOT}/usr/bin:${ROOT}/bin"
 	EOF
 	if [[ ${compiler_type} == clang ]] ; then
 		if [[ ! -e "${ROOT}"/tmp/etc/env.d/11stage3-llvm ]]; then
