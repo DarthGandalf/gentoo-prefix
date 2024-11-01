@@ -229,8 +229,8 @@ configure_toolchain() {
 					CC=clang
 					CXX=clang++
 					linker=
-					[[ "${BOOTSTRAP_STAGE}" == stage2 ]] && \
-						linker=sys-devel/lld
+					[[ "${BOOTSTRAP_STAGE}" == stage3 ]] && \
+						linker="sys-devel/lld"
 					;;
 				*)
 					eerror "unknown/unsupported compiler"
@@ -536,7 +536,7 @@ bootstrap_tree() {
 	#                      retain this comment and the line below to
 	#                      keep this snapshot around in the snapshots
 	# MKSNAPSHOT-ANCHOR -- directory of rsync slaves
-	local PV="20240930"
+	local PV="20241103"
 
 	# RAP uses the latest gentoo main repo snapshot to bootstrap.
 	is-rap && LATEST_TREE_YES=1
@@ -1790,6 +1790,7 @@ bootstrap_stage1_log() {
 }
 
 do_emerge_pkgs() {
+	echo "AAAAAAAAAAAAAAAAAA [$@] EPREFIX=[$EPREFIX]"
 	local opts=$1 ; shift
 	local pkg vdb pvdb evdb
 	for pkg in "$@"; do
@@ -1829,6 +1830,7 @@ do_emerge_pkgs() {
 			"${DISABLE_USE[@]}"
 			"-acl"
 			"-berkdb"
+			"-extra"
 			"-fortran"            # gcc
 			"-gdbm"
 			"-nls"
@@ -1944,7 +1946,7 @@ bootstrap_stage2() {
 
 	emerge_pkgs() {
 		EPREFIX="${ROOT}"/tmp \
-		STAGE=stage2 \
+		BOOTSTRAP_STAGE=stage2 \
 		do_emerge_pkgs "$@"
 	}
 
@@ -2130,6 +2132,8 @@ bootstrap_stage2() {
 			mkdir -p "${ROOT}"/usr/bin
 			ln -s "${ROOT}"/tmp/usr/lib/llvm/*/bin/llvm-libtool-darwin \
 				"${ROOT}"/usr/bin/libtool
+			ln -s "${ROOT}"/tmp/usr/lib/llvm/*/bin/llvm-libtool-darwin \
+				"${ROOT}"/usr/bin/${CHOST}-libtool
 		fi
 
 		# We use Clang as our toolchain compiler, so we need to make
@@ -2258,7 +2262,7 @@ bootstrap_stage3() {
 		# PORTAGE_OVERRIDE_EPREFIX as BROOT is needed.
 		EPREFIX="${ROOT}" PORTAGE_TMPDIR="${PORTAGE_TMPDIR}" \
 		EMERGE_LOG_DIR="${ROOT}"/var/log \
-		STAGE=stage3 \
+		BOOTSTRAP_STAGE=stage3 \
 		do_emerge_pkgs "$@"
 	}
 
@@ -2299,8 +2303,8 @@ bootstrap_stage3() {
 	fi
 
 	local -a linker_pkgs compiler_pkgs
-	read -r -a linker_pkgs <<< "${linker}"
-	read -r -a compiler_pkgs <<< "${compiler}"
+	read -r -a linker_pkgs -d '' <<< "${linker}"
+	read -r -a compiler_pkgs -d '' <<< "${compiler}"
 
 	# We need gentoo-functions but it meson is still a no-go, because we
 	# don't have a Python.  Why would such simple package with a silly
@@ -2453,7 +2457,9 @@ bootstrap_stage3() {
 		{
 			echo "#!${ROOT}/bin/sh"
 			echo 'exec llvm-libtool-darwin "$@"'
-		} > "${ROOT}"/usr/bin/${CHOST}-${bin}
+		} > "${ROOT}"/usr/bin/${CHOST}-libtool
+		chmod +x "${ROOT}"/usr/bin/${CHOST}-libtool
+		ln -s -f "${ROOT}"/usr/bin/${CHOST}-libtool "${ROOT}"/usr/bin/libtool
 
 		# Now clang is ready, can use it instead of /usr/bin/gcc
 		# TODO: perhaps symlink the whole etc/portage instead?
